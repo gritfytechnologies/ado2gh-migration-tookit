@@ -1,0 +1,5 @@
+org,teamproject,repo,pipeline,github_org,github_repo,serviceConnection
+<ado-org>,<ado-project>,app-service-1,app-service-1-CI,<github-org>,app-service-1,<service-connection-guid>
+<ado-org>,<ado-project>,app-service-2,app-service-2-CI,<github-org>,app-service-2,<service-connection-guid>
+<ado-org>,<ado-project>,app-service-3,app-service-3-CI,<github-org>,app-service-3,<service-connection-guid>
+<ado-org>,<ado-project>,app-service-4,app-service-4-CI,<github-org>,app-service-4,<service-connection-guid>

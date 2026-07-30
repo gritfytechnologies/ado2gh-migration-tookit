@@ -1,0 +1,61 @@
+{
+  "id": 17,
+  "name": "payments-api-release",
+  "projectReference": { "name": "PaymentsPlatform" },
+  "variableGroups": [501],
+  "environments": [
+    {
+      "name": "Staging",
+      "rank": 1,
+      "variableGroups": [502],
+      "preDeployApprovals": {
+        "approvals": [
+          { "approver": {"displayName": "Jane Lead", "uniqueName": "jane.lead@acme.com"}, "isAutomated": false }
+        ],
+        "approvalOptions": { "requiredApproverCount": 1, "timeoutInMinutes": 4320 }
+      },
+      "postDeployApprovals": { "approvals": [], "approvalOptions": {} },
+      "preDeploymentGates": {
+        "gatesOptions": { "isEnabled": true },
+        "gates": [
+          { "name": "Health check", "tasks": [ { "task": {"name": "InvokeRESTAPI"}, "inputs": {"url": "https://health.acme.com"} } ] }
+        ]
+      },
+      "postDeploymentGates": { "gatesOptions": { "isEnabled": false }, "gates": [] },
+      "deployPhases": [
+        {
+          "workflowTasks": [
+            { "inputs": { "azureSubscription": "acme-staging-sc" } }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Production",
+      "rank": 2,
+      "variableGroups": [503],
+      "preDeployApprovals": {
+        "approvals": [
+          { "approver": {"displayName": "Chad SVP", "uniqueName": "chad.svp@acme.com"}, "isAutomated": false },
+          { "approver": {"displayName": "Joe Manager", "uniqueName": "joe.manager@acme.com"}, "isAutomated": false }
+        ],
+        "approvalOptions": { "requiredApproverCount": 2, "timeoutInMinutes": 4320 }
+      },
+      "postDeployApprovals": { "approvals": [], "approvalOptions": {} },
+      "preDeploymentGates": { "gatesOptions": { "isEnabled": false }, "gates": [] },
+      "postDeploymentGates": {
+        "gatesOptions": { "isEnabled": true },
+        "gates": [
+          { "name": "Azure Monitor alert check", "tasks": [ { "task": {"name": "AzureMonitor"}, "inputs": {} } ] }
+        ]
+      },
+      "deployPhases": [
+        {
+          "workflowTasks": [
+            { "inputs": { "azureSubscription": "acme-prod-sc" } }
+          ]
+        }
+      ]
+    }
+  ]
+}

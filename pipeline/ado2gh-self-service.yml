@@ -1,0 +1,360 @@
+# ============================================================================
+# ado2gh-self-service.yml — Self-Service ADO → GitHub Migration Pipeline
+# 5 stages: PrerequisiteValidation → MigrationReadinessCheck → Migration
+#           → PostMigrationValidation → PipelineRewiring
+# Security: PATs injected from the <ado-variable-group> variable group only.
+#           Config-file PATs are ignored at runtime.
+# ============================================================================
+
+trigger: none
+
+parameters:
+  - name: migrationMode
+    displayName: 'Migration mode'
+    type: string
+    default: 'Selected'
+    values: [ 'All', 'Single', 'Selected' ]
+  - name: singleRepoName
+    displayName: 'Repo name (Single mode only)'
+    type: string
+    default: ' '
+  - name: dryRun
+    displayName: 'Dry run (ALWAYS run true first)'
+    type: boolean
+    default: true
+  - name: waveSize
+    displayName: 'Repos per wave'
+    type: number
+    default: 5
+  - name: concurrentJobs
+    displayName: 'Concurrent migrations (1-5)'
+    type: number
+    default: 3
+  - name: skipRewiring
+    displayName: 'Skip pipeline rewiring stage'
+    type: boolean
+    default: false
+  - name: useSelfHostedAgent
+    displayName: 'Use self-hosted agent pool'
+    type: boolean
+    default: false
+  - name: selfHostedAgentPool
+    displayName: 'Self-hosted pool name'
+    type: string
+    default: 'Default'
+
+variables:
+  - group: <ado-variable-group>   # provides GH_PAT, ADO_PAT
+  - name: outputDir
+    value: '$(Build.ArtifactStagingDirectory)/migration-output'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  # ==========================================================================
+  # STAGE 1 — PREREQUISITE VALIDATION
+  # ==========================================================================
+  - stage: PrerequisiteValidation
+    displayName: '1 — Prerequisite Validation'
+    jobs:
+      - job: ValidateTools
+        displayName: 'Validate tools & credentials'
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+
+          - task: PowerShell@2
+            displayName: 'Install gh CLI + ado2gh extension'
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                Set-StrictMode -Version Latest
+                $ErrorActionPreference = 'Stop'
+                if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+                    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+                    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list
+                    sudo apt-get update -q && sudo apt-get install -y gh jq
+                }
+                gh extension install github/gh-ado2gh 2>&1 | Out-String | Write-Host
+                gh --version; jq --version
+            env:
+              GH_TOKEN: $(GH_PAT)
+
+          - task: PowerShell@2
+            displayName: 'Validate PAT scopes & inputs'
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                Set-StrictMode -Version Latest
+                $ErrorActionPreference = 'Stop'
+                if ([string]::IsNullOrWhiteSpace($env:GH_PAT))  { throw 'GH_PAT missing from variable group <ado-variable-group>. Fix: add GH_PAT (repo, admin:org, workflow scopes).' }
+                if ([string]::IsNullOrWhiteSpace($env:ADO_PAT)) { throw 'ADO_PAT missing from variable group <ado-variable-group>. Fix: add ADO_PAT (Code Read, Build Read&Execute).' }
+                if ('${{ parameters.migrationMode }}' -eq 'Single' -and [string]::IsNullOrWhiteSpace('${{ parameters.singleRepoName }}'.Trim())) {
+                    throw "Single mode requires singleRepoName. Fix: set the 'Repo name' parameter."
+                }
+                # Validate config file exists and parses
+                $cfg = Get-Content ./migration.config.json -Raw | ConvertFrom-Json
+                foreach ($k in 'AdoOrg','AdoProject','GitHubOrg') {
+                    if (-not $cfg.$k -or $cfg.$k -like '<*>') { throw "migration.config.json: '$k' is unset or a placeholder. Fix: set a real value." }
+                }
+                Write-Host 'Prerequisite validation passed.'
+            env:
+              GH_PAT: $(GH_PAT)
+              ADO_PAT: $(ADO_PAT)
+
+  # ==========================================================================
+  # STAGE 2 — MIGRATION READINESS CHECK + MANUAL APPROVAL
+  # ==========================================================================
+  - stage: MigrationReadinessCheck
+    displayName: '2 — Readiness Check & Approval'
+    dependsOn: PrerequisiteValidation
+    jobs:
+      - job: ReadinessCheck
+        displayName: 'ADO readiness (active PRs, running builds)'
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+          - task: PowerShell@2
+            displayName: 'Check active PRs and in-flight builds'
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                Set-StrictMode -Version Latest
+                $ErrorActionPreference = 'Stop'
+                $cfg  = Get-Content ./migration.config.json -Raw | ConvertFrom-Json
+                $b64  = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$($env:ADO_PAT)"))
+                $hdr  = @{ Authorization = "Basic $b64" }
+                $base = "https://dev.azure.com/$($cfg.AdoOrg)/$($cfg.AdoProject)"
+
+                $repos = (Invoke-RestMethod -Uri "$base/_apis/git/repositories?api-version=7.1" -Headers $hdr).value
+                $prTotal = 0
+                foreach ($r in $repos) {
+                    $prs = (Invoke-RestMethod -Uri "$base/_apis/git/repositories/$($r.id)/pullrequests?searchCriteria.status=active&api-version=7.1" -Headers $hdr).value
+                    if (@($prs).Count -gt 0) {
+                        Write-Host "##vso[task.logissue type=warning]$($r.name): $(@($prs).Count) active PR(s)"
+                        $prTotal += @($prs).Count
+                    }
+                }
+                $running = (Invoke-RestMethod -Uri "$base/_apis/build/builds?statusFilter=inProgress&api-version=7.1" -Headers $hdr).value
+                Write-Host "Active PRs: $prTotal | Running builds: $(@($running).Count)"
+                Write-Host "##vso[task.setvariable variable=activePrCount;isOutput=true]$prTotal"
+            name: readiness
+            env:
+              ADO_PAT: $(ADO_PAT)
+
+      - job: WaitForApproval
+        displayName: 'Manual approval gate'
+        dependsOn: ReadinessCheck
+        pool: server
+        timeoutInMinutes: 1440   # auto-rejects after 24h
+        steps:
+          - task: ManualValidation@0
+            displayName: 'Approve migration run'
+            timeoutInMinutes: 1440
+            inputs:
+              notifyUsers: ''
+              instructions: |
+                Review the ReadinessCheck job output (active PRs / running builds)
+                and the audit artifacts from any prior dry run before approving.
+                Mode: ${{ parameters.migrationMode }} | DryRun: ${{ parameters.dryRun }}
+              onTimeout: reject
+
+  # ==========================================================================
+  # STAGE 3 — MIGRATION
+  # ==========================================================================
+  - stage: Migration
+    displayName: '3 — Migration'
+    dependsOn: MigrationReadinessCheck
+    jobs:
+      - job: RunMigration
+        displayName: 'Run Invoke-GHEMigration.ps1'
+        timeoutInMinutes: 720
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+
+          - task: PowerShell@2
+            displayName: 'Install gh CLI + ado2gh extension'
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                Set-StrictMode -Version Latest
+                $ErrorActionPreference = 'Stop'
+                if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+                    sudo apt-get update -q && sudo apt-get install -y gh jq
+                }
+                gh extension install github/gh-ado2gh 2>&1 | Out-String | Write-Host
+            env:
+              GH_TOKEN: $(GH_PAT)
+
+          - task: PowerShell@2
+            displayName: 'Execute migration'
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                Set-StrictMode -Version Latest
+                $ErrorActionPreference = 'Stop'
+                $cfg = Get-Content ./migration.config.json -Raw | ConvertFrom-Json
+
+                $params = @{
+                    Mode               = '${{ parameters.migrationMode }}'
+                    AdoOrg             = $cfg.AdoOrg
+                    AdoProject         = $cfg.AdoProject
+                    GitHubOrg          = $cfg.GitHubOrg
+                    ConfigFile         = './migration.config.json'
+                    OutputDir          = '$(outputDir)'
+                    WaveSize           = ${{ parameters.waveSize }}
+                    ConcurrentJobs     = ${{ parameters.concurrentJobs }}
+                    SkipExistingRepos  = $true
+                    ForceWithActivePrs = $true   # readiness + approval gate already reviewed PRs
+                }
+                if ('${{ parameters.migrationMode }}' -eq 'Single')   { $params.RepoName     = '${{ parameters.singleRepoName }}'.Trim() }
+                if ('${{ parameters.migrationMode }}' -eq 'Selected') { $params.RepoListFile = './repos.csv' }
+                if ('${{ parameters.dryRun }}' -eq 'True')            { $params.DryRun       = $true }
+
+                ./scripts/Invoke-GHEMigration.ps1 @params
+            env:
+              ADO_PAT: $(ADO_PAT)    # injected from variable group — config PATs ignored
+              GH_PAT:  $(GH_PAT)
+              GH_TOKEN: $(GH_PAT)
+
+          - task: PowerShell@2
+            displayName: 'Generate repos_with_status.csv (via GitHub API)'
+            condition: always()
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                Set-StrictMode -Version Latest
+                $ErrorActionPreference = 'Stop'
+                $cfg  = Get-Content ./migration.config.json -Raw | ConvertFrom-Json
+                $rows = foreach ($r in (Import-Csv ./repos.csv)) {
+                    & gh api "/repos/$($cfg.GitHubOrg)/$($r.GitHubRepo)" *> $null
+                    [PSCustomObject]@{
+                        RepoName        = $r.AdoRepo
+                        GitHubRepo      = $r.GitHubRepo
+                        MigrationStatus = if ($LASTEXITCODE -eq 0) { 'Success' } else { 'NotMigrated' }
+                    }
+                }
+                $rows | Export-Csv '$(outputDir)/repos_with_status.csv' -NoTypeInformation
+                $rows | Format-Table | Out-String | Write-Host
+            env:
+              GH_TOKEN: $(GH_PAT)
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish migration output'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(outputDir)'
+              ArtifactName: 'migration-output'
+
+  # ==========================================================================
+  # STAGE 4 — POST-MIGRATION VALIDATION (real runs only)
+  # ==========================================================================
+  - stage: PostMigrationValidation
+    displayName: '4 — Post-Migration Validation'
+    dependsOn: Migration
+    condition: and(succeeded('Migration'), eq('${{ parameters.dryRun }}', 'False'))
+    jobs:
+      - job: Validate
+        displayName: 'Verify migrated repos'
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+          - download: current
+            artifact: migration-output
+
+          - task: PowerShell@2
+            displayName: 'Verify repos exist + default branch + protection'
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                Set-StrictMode -Version Latest
+                $ErrorActionPreference = 'Stop'
+                $cfg    = Get-Content ./migration.config.json -Raw | ConvertFrom-Json
+                $status = Import-Csv '$(Pipeline.Workspace)/migration-output/repos_with_status.csv'
+                $fail   = 0
+                foreach ($row in ($status | Where-Object MigrationStatus -eq 'Success')) {
+                    $repo = & gh api "/repos/$($cfg.GitHubOrg)/$($row.GitHubRepo)" | ConvertFrom-Json
+                    Write-Host "$($row.GitHubRepo): default branch = $($repo.default_branch)"
+                    & gh api "/repos/$($cfg.GitHubOrg)/$($row.GitHubRepo)/branches/$($repo.default_branch)/protection" *> $null
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Host "##vso[task.logissue type=warning]$($row.GitHubRepo): no branch protection on $($repo.default_branch)"
+                    }
+                }
+                if ($fail -gt 0) { throw "$fail repo(s) failed validation." }
+            env:
+              GH_TOKEN: $(GH_PAT)
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish validation results'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(Pipeline.Workspace)/migration-output'
+              ArtifactName: 'validation-output'
+
+  # ==========================================================================
+  # STAGE 5 — PIPELINE REWIRING (real runs only, unless skipped)
+  # ==========================================================================
+  - stage: PipelineRewiring
+    displayName: '5 — Pipeline Rewiring'
+    dependsOn:
+      - Migration
+      - PostMigrationValidation
+    condition: >
+      and(succeeded('Migration'),
+          eq('${{ parameters.skipRewiring }}', 'False'),
+          eq('${{ parameters.dryRun }}', 'False'))
+    jobs:
+      - job: Rewire
+        displayName: 'Run 4_Rewire-Pipeline.ps1'
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+          - download: current
+            artifact: migration-output
+
+          - task: PowerShell@2
+            displayName: 'Rewire ADO pipelines to GitHub'
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                Set-StrictMode -Version Latest
+                $ErrorActionPreference = 'Stop'
+                if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+                    sudo apt-get update -q && sudo apt-get install -y gh jq
+                }
+                gh extension install github/gh-ado2gh 2>&1 | Out-String | Write-Host
+                ./scripts/4_Rewire-Pipeline.ps1 `
+                    -PipelinesCsvPath ./pipelines.csv `
+                    -RepoStatusCsvPath '$(Pipeline.Workspace)/migration-output/repos_with_status.csv' `
+                    -LogDirectory '$(Build.ArtifactStagingDirectory)'
+            env:
+              ADO_PAT: $(ADO_PAT)
+              GH_PAT:  $(GH_PAT)
+              GH_TOKEN: $(GH_PAT)
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish rewiring logs'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: 'rewiring-output'

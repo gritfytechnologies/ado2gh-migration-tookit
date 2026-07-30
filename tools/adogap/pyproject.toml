@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adogap"
+version = "1.0.0"
+description = "Gap-filler toolkit for Azure DevOps classic release pipeline to GitHub Actions migrations: extracts manual-only constructs, scaffolds GitHub Environment/OIDC config, and verifies nothing was silently dropped by gh actions-importer."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Siva" }]
+dependencies = [
+    "requests>=2.31",
+    "PyYAML>=6.0",
+    "click>=8.1",
+    "jinja2>=3.1",
+    "rich>=13.7",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+adogap = "adogap.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

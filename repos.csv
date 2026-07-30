@@ -1,0 +1,5 @@
+AdoRepo,GitHubRepo,Lfs
+app-service-1,app-service-1,no
+app-service-2,app-service-2,yes
+app-service-3,app-service-3,yes
+app-service-4,app-service-4,yes

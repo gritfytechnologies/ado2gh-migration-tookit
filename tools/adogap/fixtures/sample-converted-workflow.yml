@@ -1,0 +1,23 @@
+name: payments-api-release
+on:
+  workflow_dispatch: {}
+jobs:
+  Staging:
+    runs-on: ubuntu-latest
+    environment:
+      name: Staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+      - run: echo "deploy to staging"
+  Production:
+    needs: Staging
+    runs-on: ubuntu-latest
+    environment:
+      name: Production
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "deploy to production"

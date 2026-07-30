@@ -1,0 +1,4 @@
+Project Name,Repository Name,RemediationTier,Repo Size,Total Blob Size,Largest File,Largest File Name,Blockers Detail
+Project A,large-dataset-repo,0-MUST-SPLIT-OR-DEEP-PURGE,14.16 GB,56.08 GB,4.00 GB,data/raw_financials.pkl,BLOCKER: Total unique blob data is 56.08 GB  -  exceeds the 40 GiB GEI repository limit. | BLOCKER: Largest file is 4.00 GB  -  exceeds the 400 MiB GEI per-file migration limit.
+Project A,analytics-repo,1-Large-blob-purge,4.16 GB,27.63 GB,1.51 GB,Data/df_rm.csv,BLOCKER: Largest file is 1.51 GB  -  exceeds the 400 MiB GEI per-file migration limit.
+Project B,reporting-repo,2-Standard-purge,6.24 GB,8.10 GB,814.27 MB,notebooks/data/lti_mix_dict.pkl,BLOCKER: Largest file is 814.27 MB  -  exceeds the 400 MiB GEI per-file migration limit.

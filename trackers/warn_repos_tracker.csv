@@ -1,0 +1,4 @@
+Project Name,Repository Name,Repo Size,Warnings Detail
+Project C,asset-allocation-repo,166.18 MB,WARNING: Largest file is 330.50 MB  -  exceeds the 100 MiB GitHub push limit (blocks future pushes after migration).
+Project A,revenue-forecast-repo,435.36 MB,WARNING: Largest file is 377.22 MB  -  exceeds the 100 MiB GitHub push limit (blocks future pushes after migration).
+Project B,esg-forecast-repo,1.30 GB,WARNING: Largest file is 220.68 MB  -  exceeds the 100 MiB GitHub push limit (blocks future pushes after migration).
